@@ -1,0 +1,551 @@
+import React, { useState } from "react";
+import { Card, CardContent } from "../../../../components/ui/card";
+import { Button } from "../../../../components/ui/button";
+import { Input } from "../../../../components/ui/input";
+import { Badge } from "../../../../components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../../../../components/ui/select";
+import {
+  CheckSquare,
+  PlusCircle,
+  MessageSquare,
+  Filter,
+  Grid3x3,
+  List,
+  Search,
+  AlertCircle,
+  Tag,
+} from "lucide-react";
+import { supabase, Task as TaskType, TaskResponse, TaskProposal, TodoListItem, UserProfile, FileAttachment } from "../../../../lib/supabase";
+import { toast } from "../../../../hooks/use-toast";
+import AttachmentList from "../../../../components/AttachmentList";
+import WorkerProposalReview from "../../../../components/WorkerProposalReview";
+import ManagerProposalReview from "../../../../components/ManagerProposalReview";
+import TodoItem from "../../../../components/TodoItem";
+import { getPriorityColor, getStatusColor, getStatusLabel } from "../../utils/taskDisplay";
+import StatusIcon from "../StatusIcon";
+import { AppRole, isWorkerRole } from "../../../../lib/roles";
+
+const metadataToneByStatus: Record<string, { panel: string; label: string; titleHover: string }> = {
+  todo: { panel: "bg-amber-50/70 dark:bg-amber-950/30", label: "text-amber-700 dark:text-amber-300", titleHover: "group-hover:text-amber-700 dark:group-hover:text-amber-300" },
+  in_progress: { panel: "bg-blue-50/70 dark:bg-blue-950/30", label: "text-blue-700 dark:text-blue-300", titleHover: "group-hover:text-blue-700 dark:group-hover:text-blue-300" },
+  in_review: { panel: "bg-violet-50/70 dark:bg-violet-950/30", label: "text-violet-700 dark:text-violet-300", titleHover: "group-hover:text-violet-700 dark:group-hover:text-violet-300" },
+  completed: { panel: "bg-emerald-50/70 dark:bg-emerald-950/30", label: "text-emerald-700 dark:text-emerald-300", titleHover: "group-hover:text-emerald-700 dark:group-hover:text-emerald-300" },
+  default: { panel: "bg-slate-50/80 dark:bg-slate-800", label: "text-slate-500 dark:text-slate-300", titleHover: "group-hover:text-slate-600 dark:group-hover:text-slate-200" },
+};
+
+interface TodoListTabProps {
+  userRole: AppRole | null;
+  currentUserProfile: UserProfile | null;
+  tasks: TaskType[];
+  taskResponses: TaskResponse[];
+  taskProposals: TaskProposal[];
+  todoItems: TodoListItem[];
+  taskAttachments: Map<string, FileAttachment[]>;
+  todoAttachments: Map<string, FileAttachment[]>;
+  searchQuery: string;
+  filterStatus: string;
+  onSearchChange: (query: string) => void;
+  onFilterChange: (status: string) => void;
+  onTaskSelect: (taskId: string) => void;
+  onTabChange: (tab: string) => void;
+  onProposalUpdated: () => void;
+  onTodoUpdated: () => void;
+  onTaskResponseOpen: (task: TaskType) => void;
+  isSubmitting: boolean;
+}
+
+const TodoListTab: React.FC<TodoListTabProps> = ({
+  userRole,
+  currentUserProfile,
+  tasks,
+  taskResponses,
+  taskProposals,
+  todoItems,
+  taskAttachments,
+  todoAttachments,
+  searchQuery,
+  filterStatus,
+  onSearchChange,
+  onFilterChange,
+  onTaskSelect,
+  onTabChange,
+  onProposalUpdated,
+  onTodoUpdated,
+  onTaskResponseOpen,
+}) => {
+  const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
+
+  // Helper: Get tasks assigned to current worker that have no response yet
+  const getUnrespondedAssignedTasks = () => {
+    if (!currentUserProfile || !isWorkerRole(userRole)) return [];
+
+    const unresponded = tasks.filter((task) => {
+      const isAssignedToMe = task.assigned_to === currentUserProfile.id;
+      if (!isAssignedToMe) return false;
+
+      const hasResponse = taskResponses.some(
+        (response) =>
+          response.task_id === task.id &&
+          response.worker_id === currentUserProfile.id
+      );
+
+      return !hasResponse;
+    });
+
+    // Log attachment status for debugging
+    unresponded.forEach((task) => {
+      const attachments = taskAttachments.get(task.id);
+      if (!attachments || attachments.length === 0) {
+        console.debug(
+          `[getUnrespondedAssignedTasks] Task ${task.id} has no cached attachments`,
+          { taskId: task.id, hasCachedAttachments: attachments?.length ?? 0 }
+        );
+      }
+    });
+
+    return unresponded;
+  };
+
+  // Helper: Get pending proposals for current worker
+  const getPendingProposalsForWorker = () => {
+    if (!currentUserProfile || !isWorkerRole(userRole)) return [];
+
+    return taskProposals.filter((proposal) => {
+      const isForMe = proposal.worker_id === currentUserProfile.id;
+      const isActive = proposal.status === "pending" || proposal.status === "counter_proposed";
+      return isForMe && isActive;
+    });
+  };
+
+  const filteredTasks = tasks.filter((task) => {
+    const matchesSearch =
+      task.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      task.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      task.id.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesFilter =
+      filterStatus === "all" || task.status === filterStatus;
+    return matchesSearch && matchesFilter;
+  });
+
+  if (isWorkerRole(userRole)) {
+    return (
+      <div className="space-y-6">
+        {/* SECTION 1: AWAITING YOUR RESPONSE */}
+        <div>
+          <div className="flex items-center gap-3 mb-4">
+            <AlertCircle className="h-6 w-6 text-orange-500" />
+            <div>
+              <h2 className="text-2xl font-bold text-sheraton-navy">Awaiting Your Response</h2>
+              <p className="text-sm text-gray-600 dark:text-slate-300">Tasks assigned to you - accept, decline, or propose</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+            {getUnrespondedAssignedTasks().map((task) => (
+              <Card
+                key={task.id}
+                className={`${getStatusColor(task.status)} rounded-xl`}
+                data-attachment-popup-container
+              >
+                <CardContent className="p-5 sm:p-6">
+                  <div className="flex items-start justify-between gap-3 border-b border-slate-200 dark:border-slate-700 pb-4">
+                    <div className="min-w-0 flex-1">
+                      <p className="mb-1 text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-400">
+                        Task #{task.id.slice(0, 8)}
+                      </p>
+                      <h3 className="line-clamp-2 font-bold leading-snug text-sheraton-navy dark:text-slate-100">
+                        {task.title}
+                      </h3>
+                    </div>
+                    <div className="flex flex-shrink-0 items-center gap-1.5 text-sm font-medium text-slate-600 dark:text-slate-300">
+                      <StatusIcon status={task.status} />
+                      <span>{task.status === "todo" ? "To Do" : getStatusLabel(task.status)}</span>
+                    </div>
+                  </div>
+
+                  <p className="mt-4 line-clamp-2 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+                    {task.description}
+                  </p>
+
+                  {(task.due_date || (task as any).budget) && (
+                    <div className={`mt-4 grid grid-cols-2 gap-x-5 gap-y-4 rounded-xl ${(metadataToneByStatus[task.status] || metadataToneByStatus.default).panel} p-4`}>
+                      {task.due_date && (
+                        <div className="min-w-0">
+                          <p className={`text-sm font-semibold tracking-wide ${(metadataToneByStatus[task.status] || metadataToneByStatus.default).label}`}>Due Date</p>
+                          <p className="mt-1.5 text-sm font-semibold text-slate-800 dark:text-slate-100">{new Date(task.due_date).toLocaleDateString()}</p>
+                        </div>
+                      )}
+                      {(task as any).budget && (
+                        <div className="min-w-0">
+                          <p className={`text-sm font-semibold tracking-wide ${(metadataToneByStatus[task.status] || metadataToneByStatus.default).label}`}>Budget</p>
+                          <p className="mt-1.5 text-sm font-semibold text-emerald-700 dark:text-emerald-300">${(task as any).budget.toFixed(2)}</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="mt-4 flex items-center justify-between gap-2 border-t border-slate-200 dark:border-slate-700 pt-4">
+                    {taskAttachments.get(task.id) && taskAttachments.get(task.id)!.length > 0 && (
+                      <AttachmentList
+                        attachments={taskAttachments.get(task.id)!}
+                        compact={true}
+                        popupPlacement="auto"
+                        popupAlignment="container"
+                      />
+                    )}
+                    <Badge className={`${getPriorityColor(task.priority)} ml-auto flex-shrink-0 capitalize`}>
+                      {task.priority} Priority
+                    </Badge>
+                  </div>
+
+                  <Button
+                    onClick={() => onTaskResponseOpen(task)}
+                    className="mt-3 w-full sheraton-gradient text-white"
+                  >
+                    <AlertCircle className="mr-2 h-4 w-4" />
+                    Respond to Task
+                  </Button>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+
+          {getUnrespondedAssignedTasks().length === 0 && (
+            <Card className="border-2 border-dashed border-orange-300 dark:border-orange-800 bg-orange-50/50 dark:bg-orange-950/20">
+              <CardContent className="p-8 text-center">
+                <AlertCircle className="h-12 w-12 text-orange-400 mx-auto mb-4 opacity-50" />
+                <p className="text-gray-600 dark:text-slate-300">No tasks awaiting your response</p>
+              </CardContent>
+            </Card>
+          )}
+        </div>
+
+        {/* DIVIDER */}
+        <div className="border-t-2 border-gray-200 dark:border-slate-700 my-8 pt-8"></div>
+
+        {/* SECTION 1B: PENDING PROPOSALS */}
+        {getPendingProposalsForWorker().length > 0 && (
+          <div className="space-y-4">
+            <div className="flex items-center gap-3">
+              <MessageSquare className="h-6 w-6 text-blue-600" />
+              <div>
+                <h2 className="text-2xl font-bold text-sheraton-navy">
+                  Proposal Responses & Negotiations
+                </h2>
+                <p className="text-sm text-gray-600 dark:text-slate-300">
+                  Manager responses to your proposals - review and respond
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {getPendingProposalsForWorker().map((proposal) => {
+                const task = tasks.find((t) => t.id === proposal.task_id);
+
+                return (
+                  <WorkerProposalReview
+                    key={proposal.id}
+                    proposal={proposal}
+                    taskTitle={task?.title || "Unknown Task"}
+                    managerName="Manager"
+                    task={task}
+                    currentUserId={""}
+                    currentUserProfileId={currentUserProfile?.id}
+                    onProposalUpdated={onProposalUpdated}
+                  />
+                );
+              })}
+            </div>
+
+            <div className="border-t-2 border-gray-200 dark:border-slate-700 my-8"></div>
+          </div>
+        )}
+
+        {/* SECTION 2: YOUR ACCEPTED TASKS */}
+        <div>
+          <div className="flex items-center gap-3 mb-4">
+            <CheckSquare className="h-6 w-6 text-sheraton-gold" />
+            <div>
+              <h2 className="text-2xl font-bold text-sheraton-navy">Your Accepted Tasks</h2>
+              <p className="text-sm text-gray-600 dark:text-slate-300">Tasks you've accepted - manage your workload</p>
+            </div>
+          </div>
+
+          <div className="flex gap-2 mb-4">
+            <Select value={filterStatus} onValueChange={onFilterChange}>
+              <SelectTrigger className="w-40 border-input bg-background">
+                <Filter className="h-4 w-4 mr-2" />
+                <SelectValue placeholder="Filter" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Status</SelectItem>
+                <SelectItem value="pending">Pending</SelectItem>
+                <SelectItem value="in_progress">In Progress</SelectItem>
+                <SelectItem value="completed">Completed</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+            {todoItems
+              .filter((todo) => filterStatus === "all" || todo.status === filterStatus)
+              .map((todo) => (
+                <TodoItem
+                  key={todo.id}
+                  todo={todo}
+                  attachments={todoAttachments.get(todo.id) || []}
+                  onStatusChange={onTodoUpdated}
+                />
+              ))}
+          </div>
+
+          {todoItems.length === 0 && (
+            <Card className="border-2 border-dashed border-sheraton-gold bg-sheraton-cream dark:bg-card">
+              <CardContent className="p-12 text-center">
+                <div className="flex justify-center mb-6">
+                  <CheckSquare className="h-16 w-16 text-sheraton-gold opacity-40" />
+                </div>
+                <h3 className="text-xl font-semibold text-sheraton-navy mb-2">No accepted tasks yet</h3>
+                <p className="text-muted-foreground mb-6 max-w-sm mx-auto">
+                  When you accept a task from the section above, it will appear here for you to manage
+                </p>
+              </CardContent>
+            </Card>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Manager View
+  return (
+    <div className="space-y-6">
+      {/* Toolbar */}
+      <div className="flex flex-col md:flex-row gap-4 items-center justify-between">
+        <div className="flex-1 flex gap-2 w-full md:w-auto">
+          <div className="flex-1 relative">
+            <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search tasks..."
+              value={searchQuery}
+              onChange={(e) => onSearchChange(e.target.value)}
+              className="pl-10 border-input bg-background"
+            />
+          </div>
+
+          <Select value={filterStatus} onValueChange={onFilterChange}>
+            <SelectTrigger className="w-40 border-input bg-background">
+              <Filter className="h-4 w-4 mr-2" />
+              <SelectValue placeholder="Filter" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Status</SelectItem>
+              <SelectItem value="todo">To Do</SelectItem>
+              <SelectItem value="in_progress">In Progress</SelectItem>
+              <SelectItem value="in_review">In Review</SelectItem>
+              <SelectItem value="completed">Completed</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="flex gap-2 border-l pl-4">
+          <Button
+            variant={viewMode === "grid" ? "default" : "outline"}
+            size="sm"
+            onClick={() => setViewMode("grid")}
+            className={viewMode === "grid" ? "sheraton-gradient text-white" : ""}
+            title="Grid view"
+          >
+            <Grid3x3 className="h-4 w-4" />
+          </Button>
+          <Button
+            variant={viewMode === "list" ? "default" : "outline"}
+            size="sm"
+            onClick={() => setViewMode("list")}
+            className={viewMode === "list" ? "sheraton-gradient text-white" : ""}
+            title="List view"
+          >
+            <List className="h-4 w-4" />
+          </Button>
+        </div>
+      </div>
+
+      {/* PENDING PROPOSALS SECTION - Manager View */}
+      {taskProposals.some((p) => p.status === "pending") && (
+        <div className="space-y-4 my-8">
+          <div className="flex items-center gap-3">
+            <MessageSquare className="h-6 w-6 text-blue-600" />
+            <div>
+              <h2 className="text-2xl font-bold text-sheraton-navy">Pending Proposals</h2>
+              <p className="text-sm text-gray-600 dark:text-slate-300">
+                {taskProposals.filter((p) => p.status === "pending").length} proposal(s) awaiting your review
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {taskProposals
+              .filter((p) => p.status === "pending")
+              .map((proposal) => {
+                const task = tasks.find((t) => t.id === proposal.task_id);
+
+                return (
+                  <ManagerProposalReview
+                    key={proposal.id}
+                    proposal={proposal}
+                    taskTitle={task?.title || "Unknown Task"}
+                    workerName={task?.assignee_name || "Unknown Worker"}
+                    onProposalUpdated={onProposalUpdated}
+                  />
+                );
+              })}
+          </div>
+        </div>
+      )}
+
+      {taskProposals.some((p) => p.status === "pending") && (
+        <div className="border-t-2 border-gray-200 dark:border-slate-700 my-8"></div>
+      )}
+
+      {/* Tasks Display */}
+      <div
+        className={
+          viewMode === "grid"
+            ? "grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6"
+            : "space-y-4"
+        }
+      >
+        {filteredTasks.map((task) => (
+          <Card
+            key={task.id}
+            className={`${getStatusColor(task.status)} group rounded-xl`}
+          >
+            <CardContent className="p-5 sm:p-6">
+              <div className="flex items-start gap-3 border-b border-slate-100 dark:border-slate-700 pb-4">
+                <div className="min-w-0 flex-1">
+                  <div className="mb-1 flex flex-wrap items-center gap-2">
+                    <p className="text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-400">
+                      Task #{task.id.slice(0, 8)}
+                    </p>
+                    {(task as any).is_from_complaint && (
+                      <Badge className="bg-orange-50 dark:bg-orange-950/30 text-orange-700 dark:text-orange-300 text-xs">
+                        <Tag className="mr-1 h-3 w-3" />
+                        Complaint
+                      </Badge>
+                    )}
+                  </div>
+                  <h3 className={`line-clamp-2 font-bold leading-snug text-sheraton-navy transition-colors duration-200 dark:text-slate-100 ${(metadataToneByStatus[task.status] || metadataToneByStatus.default).titleHover}`}>
+                    {task.title}
+                  </h3>
+                </div>
+                <div className="flex flex-shrink-0 items-center gap-1.5 text-sm font-medium text-slate-600 dark:text-slate-300">
+                  <StatusIcon status={task.status} />
+                  <span>{task.status === "todo" ? "To Do" : getStatusLabel(task.status)}</span>
+                </div>
+              </div>
+
+              <p className="mt-4 min-h-10 line-clamp-2 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+                {task.description}
+              </p>
+
+              <div className={`mt-4 grid grid-cols-2 gap-x-5 gap-y-4 rounded-xl ${(metadataToneByStatus[task.status] || metadataToneByStatus.default).panel} p-4`}>
+                {task.due_date && (
+                  <div className="min-w-0">
+                    <p className={`text-sm font-semibold tracking-wide ${(metadataToneByStatus[task.status] || metadataToneByStatus.default).label}`}>Due Date</p>
+                    <p className="mt-1.5 text-sm font-semibold text-slate-800 dark:text-slate-100">{new Date(task.due_date).toLocaleDateString()}</p>
+                  </div>
+                )}
+                {task.assignee_name && (
+                  <div className="min-w-0">
+                    <p className={`text-sm font-semibold tracking-wide ${(metadataToneByStatus[task.status] || metadataToneByStatus.default).label}`}>Assigned To</p>
+                    <p className="mt-1.5 truncate text-sm font-semibold text-slate-800 dark:text-slate-100" title={task.assignee_name}>{task.assignee_name}</p>
+                  </div>
+                )}
+                {task.category && (
+                  <div className="min-w-0">
+                    <p className={`text-sm font-semibold tracking-wide ${(metadataToneByStatus[task.status] || metadataToneByStatus.default).label}`}>Category</p>
+                    <p className="mt-1.5 truncate text-sm font-semibold capitalize text-slate-800 dark:text-slate-100" title={task.category}>{task.category}</p>
+                  </div>
+                )}
+                {task.estimated_time && (
+                  <div className="min-w-0">
+                    <p className={`text-sm font-semibold tracking-wide ${(metadataToneByStatus[task.status] || metadataToneByStatus.default).label}`}>Est. Time</p>
+                    <p className="mt-1.5 text-sm font-semibold text-slate-800 dark:text-slate-100">{task.estimated_time}</p>
+                  </div>
+                )}
+                {(task as any).budget && (
+                  <div className="min-w-0">
+                    <p className={`text-sm font-semibold tracking-wide ${(metadataToneByStatus[task.status] || metadataToneByStatus.default).label}`}>Budget</p>
+                    <p className="mt-1.5 text-sm font-semibold text-emerald-700 dark:text-emerald-300">${parseFloat((task as any).budget).toFixed(2)}</p>
+                  </div>
+                )}
+                {task.assigned_category && (
+                  <div className="min-w-0">
+                    <p className={`text-sm font-semibold tracking-wide ${(metadataToneByStatus[task.status] || metadataToneByStatus.default).label}`}>Type</p>
+                    <p className="mt-1.5 text-sm font-semibold capitalize text-slate-800 dark:text-slate-100">{task.assigned_category}</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-4 flex items-center gap-2 border-t border-slate-100 dark:border-slate-700 pt-3">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    onTaskSelect(task.id);
+                    onTabChange("live-chat");
+                  }}
+                  className="rounded-lg text-slate-600 dark:text-slate-300 hover:bg-amber-50 hover:text-sheraton-navy dark:hover:bg-amber-500 dark:hover:text-slate-950"
+                >
+                  <MessageSquare className="mr-1.5 h-4 w-4" />
+                  Chat
+                </Button>
+                {(taskAttachments.get(task.id)?.length ?? 0) > 0 && (
+                  <div className="flex flex-1 justify-center">
+                    <AttachmentList
+                      attachments={taskAttachments.get(task.id)!}
+                      compact={true}
+                      popupPlacement="top"
+                    />
+                  </div>
+                )}
+                <Badge className={`${getPriorityColor(task.priority)} ml-auto rounded-full px-2.5 text-xs font-semibold`}>
+                  {task.priority.charAt(0).toUpperCase() + task.priority.slice(1)} Priority
+                </Badge>
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
+      {filteredTasks.length === 0 && (
+        <Card className="col-span-full border-2 border-dashed border-sheraton-gold bg-sheraton-cream dark:bg-card">
+          <CardContent className="p-12 text-center">
+            <div className="flex justify-center mb-6">
+              <CheckSquare className="h-16 w-16 text-sheraton-gold opacity-40" />
+            </div>
+            <h3 className="text-xl font-semibold text-sheraton-navy mb-2">No tasks found</h3>
+            <p className="text-muted-foreground mb-6 max-w-sm mx-auto">
+              Try adjusting your search or filters, or create a new task to get started
+            </p>
+            <Button
+              onClick={() => onTabChange("new-task")}
+              className="sheraton-gradient text-white"
+            >
+              <PlusCircle className="h-4 w-4 mr-2" />
+              Create New Task
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  );
+};
+
+export default TodoListTab;
